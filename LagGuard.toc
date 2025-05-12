@@ -1,0 +1,18 @@
+## Interface: 11500
+## Title: LagGuard
+## Notes: Protects hardcore players from dying due to lag spikes
+## Author: LagGuard Team
+## Version: 1.0.0
+## SavedVariables: LagGuardDB
+## X-Curse-Project-ID: LagGuard
+## X-WoWI-ID: LagGuard
+
+# Libraries
+libs\LibStub\LibStub.lua
+
+# Core files
+LagGuard.lua
+Config.lua
+Alerts.lua
+Analytics.lua
+Enhancements.lua 
