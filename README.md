@@ -124,9 +124,7 @@ In the unforgiving world of hardcore mode, a single death means the end of your 
 
 If you encounter any issues or have suggestions for improvement:
 
-- Open an issue on our [GitHub repository](https://github.com/yourusername/LagGuard)
 - Leave a comment on the [CurseForge page](https://www.curseforge.com/wow/addons/lagguard)
-- Contact us through [Discord](https://discord.gg/yourdiscord)
 
 ## License
 
