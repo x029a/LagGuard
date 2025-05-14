@@ -1,6 +1,12 @@
 # LagGuard
 
+![Screenshot_11](https://github.com/user-attachments/assets/e792bfb1-358f-42fa-ae32-735dc82a208a)
+![Screenshot_4](https://github.com/user-attachments/assets/901eedd7-c1c5-4d72-8950-97e00067dade)
+![Screenshot_16](https://github.com/user-attachments/assets/62ab7c33-7af5-4442-8bd8-32153fc330db)
+
+
 ## A World of Warcraft Classic Hardcore Addon
+
 
 LagGuard is a specialized addon designed to protect hardcore players from deaths due to unexpected lag spikes. By continuously monitoring your connection to the game servers, LagGuard provides timely warnings when your latency reaches dangerous levels, giving you a chance to react before it's too late.
 
@@ -124,9 +130,7 @@ In the unforgiving world of hardcore mode, a single death means the end of your 
 
 If you encounter any issues or have suggestions for improvement:
 
-- Open an issue on our [GitHub repository](https://github.com/yourusername/LagGuard)
 - Leave a comment on the [CurseForge page](https://www.curseforge.com/wow/addons/lagguard)
-- Contact us through [Discord](https://discord.gg/yourdiscord)
 
 ## License
 
