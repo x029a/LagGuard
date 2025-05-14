@@ -187,7 +187,17 @@ frame:SetScript("OnEvent", function(self, event, arg1)
             if self.elapsed < updateInterval then return end
             self.elapsed = 0
             
-            if not LagGuardDB or not LagGuardDB.enabled then return end
+            -- Ensure we have valid settings
+            EnsureSavedVars()
+            
+            -- If disabled, update UI if needed but don't process latency
+            if not LagGuardDB or not LagGuardDB.enabled then
+                -- Update the indicator to reflect disabled state
+                if _G["UpdateIndicator"] then
+                    _G["UpdateIndicator"]() 
+                end
+                return
+            end
             
             -- Get current latency values
             local _, _, homeLatency, worldLatency = GetNetStats()

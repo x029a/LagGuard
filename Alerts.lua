@@ -352,15 +352,26 @@ local function Initialize()
     
     -- Setup update function
     _G["UpdateIndicator"] = function()
-        if not alertFrame:IsShown() then return end
-        
         LG.EnsureSavedVars()
+        
+        -- First check if the addon is enabled
         if not LagGuardDB.enabled then
-            alertFrame:Hide()
+            -- Hide the frame if addon is disabled
+            if alertFrame then
+                alertFrame:Hide()
+            end
             return
         else
-            alertFrame:Show()
+            -- Show the frame if addon is enabled
+            if alertFrame then
+                alertFrame:Show()
+            else
+                return -- Can't update if no frame exists
+            end
         end
+        
+        -- Don't proceed if the frame isn't shown (e.g., during combat when frames can't be created)
+        if not alertFrame:IsShown() then return end
         
         local _, _, homeLatency, worldLatency = GetNetStats()
         local homeBaseline = LG.CalculateBaseline(LG.homeLatencyHistory)
@@ -471,9 +482,9 @@ local function Initialize()
             alertFrame.homeText:SetText("H")
             alertFrame.worldText:SetText("W")
         else
-            alertFrame.homeText:SetText("H: " .. homeLatency .. "ms")
-            alertFrame.worldText:SetText("W: " .. worldLatency .. "ms")
-        end
+        alertFrame.homeText:SetText("H: " .. homeLatency .. "ms")
+        alertFrame.worldText:SetText("W: " .. worldLatency .. "ms")
+    end
     end
     
     -- Load the saved position
@@ -483,20 +494,36 @@ local function Initialize()
     UpdateAlertFrameLayout()
     
     -- Run a full update
-    UpdateIndicator()
+    _G["UpdateIndicator"]()
+    
+    -- Final verification of enabled state
+    LG.EnsureSavedVars()
+    if LagGuardDB.enabled then
+        alertFrame:Show()
+    else
+        alertFrame:Hide()
+    end
 end
 
 -- Register for events
 updateFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+updateFrame:RegisterEvent("PLAYER_LOGIN") -- Add login event to ensure positions are loaded
+
 updateFrame:SetScript("OnEvent", function(self, event)
     if event == "PLAYER_ENTERING_WORLD" then
         Initialize()
         -- Unregister to prevent multiple initializations
         self:UnregisterEvent("PLAYER_ENTERING_WORLD")
+    elseif event == "PLAYER_LOGIN" then
+        -- If the frame already exists, ensure position is loaded
+        if _G["LagGuardAlertFrame"] then
+            alertFrame = _G["LagGuardAlertFrame"]
+            LoadFramePosition()
+        end
     end
 end)
 
 -- Store reference to the alertFrame for others to use
-LG.alertFrame = alertFrame
+LG.alertFrame = alertFrame 
 LG.SaveFramePosition = SaveFramePosition
 LG.UpdateAlertFrameLayout = UpdateAlertFrameLayout 

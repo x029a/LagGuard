@@ -134,7 +134,32 @@ local enabledCheckbox = CreateCheckbox(
     "Toggle the addon on or off",
     function(self)
         EnsureSavedVars()
+        local wasEnabled = LagGuardDB.enabled
         LagGuardDB.enabled = self:GetChecked()
+        
+        -- If we're enabling the addon and it was previously disabled,
+        -- make sure the UI is updated and shown
+        if LagGuardDB.enabled and not wasEnabled then
+            -- Force UI recreation/update if needed
+            C_Timer.After(0.1, function()
+                if _G["UpdateIndicator"] then
+                    _G["UpdateIndicator"]()
+                end
+            end)
+        else
+            -- Standard update
+            if _G["UpdateIndicator"] then
+                _G["UpdateIndicator"]()
+            end
+        end
+        
+        -- Update interface options checkbox as well
+        if ioEnabledCheckbox then
+            ioEnabledCheckbox:SetChecked(LagGuardDB.enabled)
+        end
+        
+        -- Print status message
+        print("LagGuard " .. (LagGuardDB.enabled and "enabled" or "disabled"))
     end
 )
 enabledCheckbox:SetPoint("TOPLEFT", description, "BOTTOMLEFT", 0, -20)
@@ -482,18 +507,46 @@ local compactModeCheckbox = CreateCheckbox(
     function(self)
         EnsureSavedVars()
         LagGuardDB.enableCompactMode = self:GetChecked()
-        -- Update the alert frame if it exists
-        if LG.UpdateAlertFrameLayout then
+        -- Update the alert frame if it exists and the layout function is available
+        if LG.alertFrame and LG.UpdateAlertFrameLayout then
             LG.UpdateAlertFrameLayout()
+        else
+            -- Queue the update for when the alert frame is created
+            C_Timer.After(0.5, function() 
+                if LG.UpdateAlertFrameLayout then
+                    LG.UpdateAlertFrameLayout()
+                end
+            end)
         end
     end
 )
 compactModeCheckbox:SetPoint("TOPLEFT", uiOptionsLabel, "BOTTOMLEFT", 20, -5)
 
+-- Minimap button checkbox
+local minimapButtonCheckbox = CreateCheckbox(
+    scrollChild,
+    "MinimapButton",
+    "Show Minimap Button",
+    "Display a button on the minimap for quick access to LagGuard features",
+    function(self)
+        EnsureSavedVars()
+        LagGuardDB.enableMinimapButton = self:GetChecked()
+        
+        -- Sync with interface options
+        if ioMinimapCheckbox then
+            ioMinimapCheckbox:SetChecked(LagGuardDB.enableMinimapButton)
+        end
+        
+        print("LagGuard minimap button " .. (LagGuardDB.enableMinimapButton and "enabled" or "disabled") .. 
+            ". Reload UI to apply change.")
+    end
+)
+minimapButtonCheckbox:SetPoint("TOPLEFT", compactModeCheckbox, "BOTTOMLEFT", 0, -5)
+
 -- View graph button
 local graphButton = CreateFrame("Button", "LagGuardGraphButton", scrollChild, "UIPanelButtonTemplate")
 graphButton:SetSize(150, 24)
-graphButton:SetPoint("TOPLEFT", compactModeCheckbox, "BOTTOMLEFT", 0, -20)
+graphButton:SetPoint("TOPLEFT", minimapButtonCheckbox, "BOTTOMLEFT", 0, -20)
 graphButton:SetText("View Latency Graph")
 graphButton:SetScript("OnClick", function()
     if LG.ToggleLatencyGraph then
@@ -648,6 +701,10 @@ RefreshControls = function()
     if compactModeCheckbox then
         compactModeCheckbox:SetChecked(LagGuardDB.enableCompactMode)
     end
+    
+    if minimapButtonCheckbox then
+        minimapButtonCheckbox:SetChecked(LagGuardDB.enableMinimapButton)
+    end
 end
 
 -- Function to toggle config visibility
@@ -717,7 +774,32 @@ local ioEnabledCheckbox = CreateCheckbox(
     "Toggle the addon on or off",
     function(self)
         EnsureSavedVars()
+        local wasEnabled = LagGuardDB.enabled
         LagGuardDB.enabled = self:GetChecked()
+        
+        -- If we're enabling the addon and it was previously disabled,
+        -- make sure the UI is updated and shown
+        if LagGuardDB.enabled and not wasEnabled then
+            -- Force UI recreation/update if needed
+            C_Timer.After(0.1, function()
+                if _G["UpdateIndicator"] then
+                    _G["UpdateIndicator"]()
+                end
+            end)
+        else
+            -- Standard update
+            if _G["UpdateIndicator"] then
+                _G["UpdateIndicator"]()
+            end
+        end
+        
+        -- Update main config panel checkbox if visible
+        if enabledCheckbox then
+            enabledCheckbox:SetChecked(LagGuardDB.enabled)
+        end
+        
+        -- Print status message
+        print("LagGuard " .. (LagGuardDB.enabled and "enabled" or "disabled"))
     end
 )
 ioEnabledCheckbox:SetPoint("TOPLEFT", openConfigButton, "BOTTOMLEFT", 0, -20)
@@ -759,6 +841,27 @@ local ioFlashCheckbox = CreateCheckbox(
 )
 ioFlashCheckbox:SetPoint("TOPLEFT", ioTextCheckbox, "BOTTOMLEFT", 0, -5)
 
+-- Add minimap button checkbox to interface options
+local ioMinimapCheckbox = CreateCheckbox(
+    interfacePanel,
+    "IOMinimapButton",
+    "Show Minimap Button",
+    "Display a LagGuard button on the minimap for quick access",
+    function(self)
+        EnsureSavedVars()
+        LagGuardDB.enableMinimapButton = self:GetChecked()
+        
+        -- Sync with main config panel
+        if minimapButtonCheckbox then
+            minimapButtonCheckbox:SetChecked(LagGuardDB.enableMinimapButton)
+        end
+        
+        print("LagGuard minimap button " .. (LagGuardDB.enableMinimapButton and "enabled" or "disabled") .. 
+            ". Reload UI to apply change.")
+    end
+)
+ioMinimapCheckbox:SetPoint("TOPLEFT", ioFlashCheckbox, "BOTTOMLEFT", 0, -5)
+
 -- Function to refresh the Interface Options panel
 local function RefreshInterfaceOptions()
     if not interfacePanel:IsVisible() then return end
@@ -767,6 +870,7 @@ local function RefreshInterfaceOptions()
     ioSoundCheckbox:SetChecked(LagGuardDB.soundEnabled)
     ioTextCheckbox:SetChecked(LagGuardDB.textEnabled)
     ioFlashCheckbox:SetChecked(LagGuardDB.flashScreen)
+    ioMinimapCheckbox:SetChecked(LagGuardDB.enableMinimapButton)
 end
 
 -- Update Interface Options whenever it's shown
@@ -782,7 +886,7 @@ local function RegisterInterfaceOptions()
     else
         -- Classic
         if InterfaceOptions_AddCategory then
-            InterfaceOptions_AddCategory(interfacePanel)
+            InterfaceOptions_AddOnCategory(interfacePanel)
         end
     end
 end
@@ -810,7 +914,7 @@ end)
 -- Export functions for other files to use
 LG.RefreshConfig = RefreshControls
 LG.ToggleConfig = ToggleConfig
-LG.EnsureSavedVars = EnsureSavedVars
+LG.EnsureSavedVars = EnsureSavedVars 
 
 -- Initialize new default settings
 local enhancementsDefaults = {

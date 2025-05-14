@@ -40,6 +40,246 @@ local lastScoreUpdate = 0
 local enhancementsFrame = CreateFrame("Frame")
 local currentConnectionScore = 100  -- 0-100 scale, 100 is perfect
 
+-- Combat Safety Features
+local combatProtectionActive = false
+local lastCombatNotification = 0
+local defensiveCooldowns = {}
+
+-- Advanced analytics and time-of-day tracking
+local timeOfDayData = {}  -- [hour] = {avgLatency, samples}
+local latencyPredictions = {}
+local lastPredictionUpdate = 0
+local predictionUpdateInterval = 300 -- Update predictions every 5 minutes
+local historyDuration = 7 * 86400 -- Store 7 days of data
+
+-- Load class-specific defensive cooldowns
+local function LoadDefensiveCooldowns()
+    local _, class = UnitClass("player")
+    defensiveCooldowns = {}
+    
+    -- Define defensive cooldowns by class
+    if class == "WARRIOR" then
+        defensiveCooldowns = {
+            {spell = "Shield Wall", id = 871},
+            {spell = "Last Stand", id = 12975},
+            {spell = "Defensive Stance", id = 71},
+        }
+    elseif class == "PALADIN" then
+        defensiveCooldowns = {
+            {spell = "Divine Shield", id = 642},
+            {spell = "Divine Protection", id = 498},
+            {spell = "Lay on Hands", id = 633},
+        }
+    elseif class == "HUNTER" then
+        defensiveCooldowns = {
+            {spell = "Feign Death", id = 5384},
+            {spell = "Aspect of the Turtle", id = 186265},
+            {spell = "Exhilaration", id = 109304},
+        }
+    elseif class == "ROGUE" then
+        defensiveCooldowns = {
+            {spell = "Cloak of Shadows", id = 31224},
+            {spell = "Evasion", id = 5277},
+            {spell = "Crimson Vial", id = 185311},
+        }
+    elseif class == "PRIEST" then
+        defensiveCooldowns = {
+            {spell = "Desperate Prayer", id = 19236},
+            {spell = "Power Word: Shield", id = 17},
+            {spell = "Fade", id = 586},
+        }
+    elseif class == "SHAMAN" then
+        defensiveCooldowns = {
+            {spell = "Astral Shift", id = 108271},
+            {spell = "Healing Surge", id = 8004},
+            {spell = "Earth Shield", id = 974},
+        }
+    elseif class == "MAGE" then
+        defensiveCooldowns = {
+            {spell = "Ice Block", id = 45438},
+            {spell = "Alter Time", id = 108978},
+            {spell = "Ice Barrier", id = 11426},
+        }
+    elseif class == "WARLOCK" then
+        defensiveCooldowns = {
+            {spell = "Unending Resolve", id = 104773},
+            {spell = "Dark Pact", id = 108416},
+            {spell = "Healthstone", id = 5512},
+        }
+    elseif class == "MONK" then
+        defensiveCooldowns = {
+            {spell = "Fortifying Brew", id = 115203},
+            {spell = "Zen Meditation", id = 115176},
+            {spell = "Diffuse Magic", id = 122783},
+        }
+    elseif class == "DRUID" then
+        defensiveCooldowns = {
+            {spell = "Barkskin", id = 22812},
+            {spell = "Survival Instincts", id = 61336},
+            {spell = "Frenzied Regeneration", id = 22842},
+        }
+    elseif class == "DEATHKNIGHT" then
+        defensiveCooldowns = {
+            {spell = "Icebound Fortitude", id = 48792},
+            {spell = "Anti-Magic Shell", id = 48707},
+            {spell = "Death Strike", id = 49998},
+        }
+    elseif class == "DEMONHUNTER" then
+        defensiveCooldowns = {
+            {spell = "Blur", id = 198589},
+            {spell = "Darkness", id = 196718},
+            {spell = "Netherwalk", id = 196555},
+        }
+    end
+end
+
+-- Check for available defensive cooldowns
+local function GetAvailableDefensives()
+    local available = {}
+    for _, cd in ipairs(defensiveCooldowns) do
+        local start, duration = GetSpellCooldown(cd.id)
+        -- If the spell is ready or will be ready in less than 1 second
+        if start == 0 or (start > 0 and (start + duration - GetTime()) < 1) then
+            table.insert(available, cd.spell)
+        end
+    end
+    return available
+end
+
+-- Display defensive cooldown suggestions during high latency
+local function SuggestDefensives(latency)
+    -- Only show suggestions in combat
+    if not UnitAffectingCombat("player") then return end
+    
+    -- Don't spam suggestions
+    local now = GetTime()
+    if now - lastCombatNotification < 5 then return end
+    lastCombatNotification = now
+    
+    -- Get available defensive abilities
+    local availableCDs = GetAvailableDefensives()
+    
+    if #availableCDs > 0 then
+        local message = "|cFFFF0000HIGH LATENCY WARNING!|r Consider using: "
+        for i, cd in ipairs(availableCDs) do
+            if i > 1 then message = message .. " or " end
+            message = message .. "|cFFFFFF00" .. cd .. "|r"
+        end
+        
+        -- Show as raid warning style message (since this is important)
+        RaidNotice_AddMessage(RaidWarningFrame, message, ChatTypeInfo["RAID_WARNING"])
+        -- Also add to chat
+        if LagGuardDB.chatAlerts then
+            print(message)
+        end
+        
+        -- Play sound
+        if LagGuardDB.soundEnabled then
+            PlaySound(8959, "Master") -- RAID_WARNING sound
+        end
+        
+        -- Log the suggestion
+        LogLatencyEvent(3, "Defensive cooldown suggestion during high latency (" .. latency .. "ms)")
+    end
+end
+
+-- Notify party members about lag issues
+local function NotifyPartyOfLag(latency)
+    -- Don't notify if the player is not in a group
+    if not IsInGroup() then return end
+    
+    -- Don't spam notifications
+    local now = GetTime()
+    if now - lastCombatNotification < 30 then return end
+    lastCombatNotification = now
+    
+    -- Only notify for severe lag
+    if latency < LagGuardDB.dangerThreshold then return end
+    
+    -- Only notify if enabled
+    if not LagGuardDB.notifyGroupOfLag then return end
+    
+    -- Send a whisper to party/raid members
+    local message = "LagGuard Alert: I'm experiencing high latency (" .. latency .. "ms). Please be aware."
+    
+    if IsInRaid() then
+        SendChatMessage(message, "RAID")
+    else
+        SendChatMessage(message, "PARTY")
+    end
+    
+    -- Log the notification
+    LogLatencyEvent(3, "Notified group of severe latency (" .. latency .. "ms)")
+end
+
+-- Combat entry warning
+local function WarnOnCombatEntry()
+    -- Check for entry to combat
+    if UnitAffectingCombat("player") and not combatProtectionActive then
+        combatProtectionActive = true
+        
+        -- Get current latency
+        local _, _, homeLatency, worldLatency = GetNetStats()
+        local maxLatency = math.max(homeLatency, worldLatency)
+        
+        -- Only warn if latency is above threshold
+        if maxLatency >= LagGuardDB.warningThreshold then
+            -- Show warning
+            local message = "|cFFFF0000WARNING:|r Entering combat with high latency (" .. maxLatency .. "ms)"
+            RaidNotice_AddMessage(RaidWarningFrame, message, ChatTypeInfo["RAID_WARNING"])
+            
+            -- Play alert sound
+            if LagGuardDB.soundEnabled then
+                PlaySound(8959, "Master") -- RAID_WARNING sound
+            end
+            
+            -- Log the warning
+            LogLatencyEvent(3, "Entered combat with high latency (" .. maxLatency .. "ms)")
+            
+            -- Suggest defensive cooldowns immediately
+            SuggestDefensives(maxLatency)
+            
+            -- Notify party if enabled
+            NotifyPartyOfLag(maxLatency)
+        end
+    elseif not UnitAffectingCombat("player") and combatProtectionActive then
+        -- Reset combat state
+        combatProtectionActive = false
+    end
+end
+
+-- Set up combat protection frame
+local combatProtectionFrame = CreateFrame("Frame")
+combatProtectionFrame:RegisterEvent("PLAYER_REGEN_DISABLED") -- Entering combat
+combatProtectionFrame:RegisterEvent("PLAYER_REGEN_ENABLED")  -- Leaving combat
+
+combatProtectionFrame:SetScript("OnEvent", function(self, event)
+    if event == "PLAYER_REGEN_DISABLED" then
+        -- Entering combat
+        WarnOnCombatEntry()
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        -- Leaving combat
+        combatProtectionActive = false
+    end
+end)
+
+-- Add to the UpdateEnhancements function to check during combat
+local originalUpdateEnhancements = UpdateEnhancements
+UpdateEnhancements = function()
+    -- Call original function
+    originalUpdateEnhancements()
+    
+    -- Get current latency
+    local _, _, homeLatency, worldLatency = GetNetStats()
+    local maxLatency = math.max(homeLatency or 0, worldLatency or 0)
+    
+    -- Check if we need to take combat protective actions
+    if UnitAffectingCombat("player") and maxLatency >= LagGuardDB.dangerThreshold then
+        -- Suggest defensive cooldowns
+        SuggestDefensives(maxLatency)
+    end
+end
+
 -- Safe Zone Detection
 local function RecordZoneLatency()
     if not LG.defaults.recordZoneLatency then return end
@@ -163,6 +403,7 @@ local function LogLatencyEvent(severity, message)
     -- Check if logging is explicitly disabled (default to enabled)
     if LG.defaults.enableLatencyLog == false then return end
     
+    -- Format timestamp with date and time
     local timestamp = date("%m/%d %H:%M:%S")
     local entry = {
         timestamp = timestamp,
@@ -170,17 +411,37 @@ local function LogLatencyEvent(severity, message)
         message = message
     }
     
-    table.insert(latencyLogEntries, 1, entry)
-    if #latencyLogEntries > (LG.defaults.latencyLogSize or 50) then
-        table.remove(latencyLogEntries)
+    -- Only add the entry if it's not a duplicate of the most recent entry
+    local isDuplicate = false
+    if #latencyLogEntries > 0 then
+        local lastEntry = latencyLogEntries[1]
+        if lastEntry.message == message and lastEntry.severity == severity then
+            -- Check if it's within 10 seconds (to avoid rapid duplicates)
+            local lastTime = lastEntry.timestamp
+            if lastTime and (timestamp:sub(8) == lastTime:sub(8)) then
+                isDuplicate = true
+            end
+        end
     end
     
-    -- Save to persistent storage
-    if LagGuardDB then
-        if not LagGuardDB.latencyLog then
-            LagGuardDB.latencyLog = {}
+    if not isDuplicate then
+        table.insert(latencyLogEntries, 1, entry)
+        if #latencyLogEntries > (LG.defaults.latencyLogSize or 50) then
+            table.remove(latencyLogEntries)
         end
-        LagGuardDB.latencyLog = latencyLogEntries
+        
+        -- Save to persistent storage
+        if LagGuardDB then
+            if not LagGuardDB.latencyLog then
+                LagGuardDB.latencyLog = {}
+            end
+            LagGuardDB.latencyLog = latencyLogEntries
+            
+            -- If the log frame is visible, update it
+            if LG.logFrame and LG.logFrame:IsShown() then
+                LG.logFrame.Update()
+            end
+        end
     end
 end
 
@@ -207,7 +468,7 @@ end
 -- Create the Latency Log UI
 local function CreateLatencyLogFrame()
     local logFrame = CreateFrame("Frame", "LagGuardLogFrame", UIParent)
-    logFrame:SetSize(500, 300)
+    logFrame:SetSize(600, 400) -- Increased width and height for better readability
     logFrame:SetPoint("CENTER")
     logFrame:SetFrameStrata("DIALOG")
     logFrame:SetMovable(true)
@@ -246,7 +507,27 @@ local function CreateLatencyLogFrame()
     local scrollChild = CreateFrame("Frame", "LagGuardLogScrollChild", scrollFrame)
     scrollFrame:SetScrollChild(scrollChild)
     scrollChild:SetWidth(scrollFrame:GetWidth())
-    scrollChild:SetHeight(500) -- Tall enough for many entries
+    scrollChild:SetHeight(800) -- Tall enough for many entries
+    
+    -- Create column headers
+    local timestampHeader = scrollChild:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    timestampHeader:SetPoint("TOPLEFT", 5, 10)
+    timestampHeader:SetWidth(100) -- Increased width for date/time format
+    timestampHeader:SetJustifyH("LEFT")
+    timestampHeader:SetText("Timestamp")
+    
+    local messageHeader = scrollChild:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    messageHeader:SetPoint("LEFT", timestampHeader, "RIGHT", 5, 0)
+    messageHeader:SetPoint("RIGHT", -5, 0)
+    messageHeader:SetJustifyH("LEFT")
+    messageHeader:SetText("Message")
+    
+    -- Add a divider line below headers
+    local divider = scrollChild:CreateTexture(nil, "ARTWORK")
+    divider:SetHeight(2)
+    divider:SetPoint("TOPLEFT", timestampHeader, "BOTTOMLEFT", 0, -2)
+    divider:SetPoint("TOPRIGHT", messageHeader, "BOTTOMRIGHT", 0, -2)
+    divider:SetColorTexture(0.7, 0.7, 0.7, 0.6)
     
     -- Close button
     local closeButton = CreateFrame("Button", nil, logFrame, "UIPanelCloseButton")
@@ -266,12 +547,83 @@ local function CreateLatencyLogFrame()
         logFrame.Update()
     end)
     
+    -- Export log button
+    local exportButton = CreateFrame("Button", nil, logFrame, "UIPanelButtonTemplate")
+    exportButton:SetSize(80, 24)
+    exportButton:SetPoint("RIGHT", clearButton, "LEFT", -10, 0)
+    exportButton:SetText("Export")
+    exportButton:SetScript("OnClick", function()
+        -- Create a formatted text of all log entries
+        local exportText = "LagGuard Latency Log Export\n\n"
+        for _, entry in ipairs(latencyLogEntries) do
+            local severity = ""
+            if entry.severity >= 3 then
+                severity = "[SEVERE] "
+            elseif entry.severity >= 2 then
+                severity = "[WARNING] "
+            end
+            exportText = exportText .. entry.timestamp .. " " .. severity .. entry.message .. "\n"
+        end
+        
+        -- Display in a simple popup
+        if _G["LagGuardExportFrame"] then
+            _G["LagGuardExportFrame"]:Hide()
+        end
+        
+        local exportFrame = CreateFrame("Frame", "LagGuardExportFrame", UIParent)
+        exportFrame:SetSize(600, 400)
+        exportFrame:SetPoint("CENTER")
+        exportFrame:SetFrameStrata("DIALOG")
+        exportFrame:SetMovable(true)
+        exportFrame:EnableMouse(true)
+        exportFrame:RegisterForDrag("LeftButton")
+        exportFrame:SetScript("OnDragStart", exportFrame.StartMoving)
+        exportFrame:SetScript("OnDragStop", exportFrame.StopMovingOrSizing)
+        exportFrame:SetClampedToScreen(true)
+        
+        local exportBg = exportFrame:CreateTexture(nil, "BACKGROUND")
+        exportBg:SetAllPoints()
+        exportBg:SetColorTexture(0, 0, 0, 0.9)
+        
+        local exportBorder = CreateFrame("Frame", nil, exportFrame, "BackdropTemplate")
+        exportBorder:SetPoint("TOPLEFT", exportFrame, "TOPLEFT", -1, 1)
+        exportBorder:SetPoint("BOTTOMRIGHT", exportFrame, "BOTTOMRIGHT", 1, -1)
+        exportBorder:SetBackdrop({
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            edgeSize = 32,
+            insets = { left = 11, right = 11, top = 12, bottom = 10 },
+        })
+        
+        local exportTitle = exportFrame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+        exportTitle:SetPoint("TOP", 0, -15)
+        exportTitle:SetText("Latency Log Export")
+        
+        local exportScrollFrame = CreateFrame("ScrollFrame", "LagGuardExportScrollFrame", exportFrame, "UIPanelScrollFrameTemplate")
+        exportScrollFrame:SetPoint("TOPLEFT", 15, -40)
+        exportScrollFrame:SetPoint("BOTTOMRIGHT", -35, 40)
+        
+        local exportScrollChild = CreateFrame("EditBox", "LagGuardExportScrollChild", exportScrollFrame)
+        exportScrollFrame:SetScrollChild(exportScrollChild)
+        exportScrollChild:SetWidth(exportScrollFrame:GetWidth())
+        exportScrollChild:SetHeight(800)
+        exportScrollChild:SetMultiLine(true)
+        exportScrollChild:SetAutoFocus(false)
+        exportScrollChild:SetFontObject("ChatFontNormal")
+        exportScrollChild:SetText(exportText)
+        
+        local exportCloseButton = CreateFrame("Button", nil, exportFrame, "UIPanelCloseButton")
+        exportCloseButton:SetPoint("TOPRIGHT", -5, -5)
+        exportCloseButton:SetScript("OnClick", function() exportFrame:Hide() end)
+        
+        exportFrame:Show()
+    end)
+    
     -- Function to update log entries display
     logFrame.Update = function()
         -- Clear existing entries
         for i = 1, scrollChild:GetNumChildren() do
             local child = select(i, scrollChild:GetChildren())
-            if child then
+            if child and child:GetObjectType() == "Frame" and not child:GetName() then
                 child:Hide()
             end
         end
@@ -282,7 +634,7 @@ local function CreateLatencyLogFrame()
         -- Get all existing entry frames
         for i = 1, scrollChild:GetNumChildren() do
             local frame = select(i, scrollChild:GetChildren())
-            if frame then
+            if frame and frame:GetObjectType() == "Frame" and not frame:GetName() then
                 table.insert(entryFrames, frame)
             end
         end
@@ -298,7 +650,7 @@ local function CreateLatencyLogFrame()
                 
                 local timestamp = entryFrame:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
                 timestamp:SetPoint("LEFT", 5, 0)
-                timestamp:SetWidth(80)
+                timestamp:SetWidth(100) -- Increased width for date/time format
                 timestamp:SetJustifyH("LEFT")
                 entryFrame.timestamp = timestamp
                 
@@ -309,8 +661,8 @@ local function CreateLatencyLogFrame()
                 entryFrame.message = message
             end
             
-            -- Position the entry
-            entryFrame:SetPoint("TOPLEFT", 0, -((i-1) * 20))
+            -- Position the entry (account for headers)
+            entryFrame:SetPoint("TOPLEFT", 0, -((i) * 20))
             
             -- Set the text
             entryFrame.timestamp:SetText(entry.timestamp)
@@ -326,6 +678,19 @@ local function CreateLatencyLogFrame()
             end
             
             entryFrame:Show()
+        end
+        
+        -- Add a "No entries" message if the log is empty
+        if #latencyLogEntries == 0 then
+            local noEntriesFrame = CreateFrame("Frame", nil, scrollChild)
+            noEntriesFrame:SetSize(scrollChild:GetWidth(), 20)
+            noEntriesFrame:SetPoint("TOPLEFT", 0, -20)
+            
+            local noEntriesText = noEntriesFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+            noEntriesText:SetPoint("CENTER", 0, 0)
+            noEntriesText:SetText("No log entries to display")
+            
+            noEntriesFrame:Show()
         end
     end
     
@@ -458,16 +823,36 @@ local function ToggleLatencyLog()
     if not LG.logFrame then
         CreateLatencyLogFrame()
         
-        -- Add an entry if the log is empty
-        if #latencyLogEntries == 0 or (#latencyLogEntries == 1 and latencyLogEntries[1].message == "LagGuard Enhancements loaded") then
+        -- Add entries if the log is empty or only has the startup message
+        if #latencyLogEntries <= 1 then
             local _, _, homeLatency, worldLatency = GetNetStats()
             LogLatencyEvent(1, "Latency log created")
             LogLatencyEvent(1, string.format("Current latency - Home: %dms, World: %dms", homeLatency, worldLatency))
+            
+            -- Add info about connection quality
+            if LG.CalculateConnectionScore then
+                local score = LG.CalculateConnectionScore()
+                LogLatencyEvent(1, string.format("Connection quality score: %d/100", math.floor(score)))
+            end
             
             -- Add info about how the log works
             LogLatencyEvent(1, "Log will record latency spikes and connection events")
             LogLatencyEvent(1, "Yellow entries indicate moderate latency spikes")
             LogLatencyEvent(1, "Red entries indicate severe latency spikes")
+            
+            -- Add packet loss info if available
+            if LG.analytics and LG.analytics.estimatePacketLoss then
+                local packetLoss = LG.analytics.estimatePacketLoss()
+                LogLatencyEvent(1, string.format("Current packet loss estimate: %.1f%%", packetLoss))
+            end
+            
+            -- Check for safe zone status
+            if LG.IsSafeZone then
+                local isSafe = LG.IsSafeZone()
+                if isSafe ~= nil then
+                    LogLatencyEvent(1, "Current zone is " .. (isSafe and "historically stable" or "historically unstable"))
+                end
+            end
         end
     end
     
@@ -497,7 +882,7 @@ end
 local function ShowLoginCommands()
     -- Create a message frame that will show and then fade out
     local messageFrame = CreateFrame("Frame", "LagGuardCommandsFrame", UIParent)
-    messageFrame:SetSize(600, 300)
+    messageFrame:SetSize(600, 350)
     messageFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 100)
     messageFrame:SetFrameStrata("HIGH")
     
@@ -536,16 +921,23 @@ local function ShowLoginCommands()
         
         "|cFFFFFF00Visual Tools:|r\n" ..
         "/lg graph - Display the latency trend graph\n" ..
-        "/lg score - Show/hide connection quality score\n\n" ..
+        "/lg score - Show/hide connection quality score\n" ..
+        "/lg map - Show zone latency map\n" ..
+        "/lg time - Show time of day analysis\n\n" ..
         
         "|cFFFFFF00Data Tools:|r\n" ..
         "/lg log - Show latency event log\n" ..
         "/lg safezone - Check if your current zone has stable latency\n" ..
         "/lg analytics - Show current analytics stats\n" ..
-        "/lg stats - Same as analytics\n\n" ..
+        "/lg minimap - Toggle minimap button\n\n" ..
         
-        "|cFFFFFF00Testing:|r\n" ..
-        "Use the config panel to test different alert levels"
+        "|cFFFFFF00Safety Features:|r\n" ..
+        "- Combat warnings based on latency\n" ..
+        "- Defensive ability suggestions\n" ..
+        "- Time-based latency predictions\n" ..
+        "- Party/raid notifications\n" ..
+        "- Safe zone detection\n" ..
+        "- Latency forecasting"
     )
     
     -- Create close button
@@ -604,6 +996,12 @@ local function UpdateEnhancements()
     -- Check for zone changes and record latency data
     RecordZoneLatency()
     
+    -- Update time of day data
+    UpdateTimeOfDayData()
+    
+    -- Check for predictive warnings
+    CheckLatencyPredictionWarning()
+    
     -- Update connection score periodically
     local currentTime = GetTime()
     if currentTime - lastScoreUpdate > LG.defaults.scoreUpdateInterval then
@@ -615,10 +1013,10 @@ local function UpdateEnhancements()
             LG.scoreFrame.Update()
         end
         
-        -- Log periodic latency info (every minute)
-        if math.floor(currentTime) % 60 == 0 then
+        -- Log periodic latency info (every 30 seconds instead of every minute)
+        if math.floor(currentTime) % 30 == 0 then
             local _, _, homeLatency, worldLatency = GetNetStats()
-            LogLatencyEvent(1, string.format("Latency status - Home: %dms, World: %dms, Score: %d", 
+            LogLatencyEvent(1, string.format("Status - Home: %dms, World: %dms, Score: %d", 
                 homeLatency, worldLatency, math.floor(currentConnectionScore)))
         end
     end
@@ -635,6 +1033,14 @@ local function UpdateEnhancements()
     if maxLatency >= severeThreshold then
         local spikeType = (homeLatency > worldLatency) and "Home" or "World"
         LogLatencyEvent(3, "Severe " .. spikeType .. " latency spike: " .. maxLatency .. "ms")
+        
+        -- Add additional diagnostic info for severe spikes
+        if LG.analytics and LG.analytics.estimatePacketLoss then
+            local packetLoss = LG.analytics.estimatePacketLoss()
+            if packetLoss > 0.5 then
+                LogLatencyEvent(3, string.format("Detected packet loss: %.1f%%", packetLoss))
+            end
+        end
     -- Log moderate spikes
     elseif maxLatency >= moderateThreshold then
         local spikeType = (homeLatency > worldLatency) and "Home" or "World"
@@ -644,6 +1050,17 @@ local function UpdateEnhancements()
     -- Automatic actions if enabled
     if maxLatency >= LG.defaults.autoActionsThreshold then
         PerformAutoActions(maxLatency)
+    end
+    
+    -- Check if we need to take combat protective actions
+    if UnitAffectingCombat("player") and maxLatency >= LG.defaults.dangerThreshold then
+        -- Suggest defensive cooldowns
+        SuggestDefensives(maxLatency)
+        
+        -- Notify party if severe
+        if maxLatency >= LG.defaults.dangerThreshold then
+            NotifyPartyOfLag(maxLatency)
+        end
     end
 end
 
@@ -664,6 +1081,18 @@ local function RegisterCommands()
             else
                 print("LagGuard: Current zone has historically had unstable latency.")
             end
+        elseif msg == "map" or msg == "zonemap" then
+            -- New command to show the zone latency map
+            ToggleLatencyMap()
+        elseif msg == "time" or msg == "analytics" then
+            -- New command to show time analysis
+            ToggleTimeAnalysis()
+        elseif msg == "minimap" then
+            -- Toggle minimap button
+            LG.EnsureSavedVars()
+            LagGuardDB.enableMinimapButton = not LagGuardDB.enableMinimapButton
+            print("LagGuard minimap button " .. (LagGuardDB.enableMinimapButton and "enabled" or "disabled") .. 
+                ". Reload UI to apply change.")
         elseif msg == "help" or msg == "" then
             -- Show the commands help frame when "/lg help" or just "/lg" is used
             ShowLoginCommands()
@@ -679,6 +1108,8 @@ local function RegisterCommands()
     print("/lg log - Show latency event log")
     print("/lg score - Toggle connection quality score")
     print("/lg safezone - Check if current zone is historically stable")
+    print("/lg map - Show latency map by zone")
+    print("/lg time - Show time of day analysis")
     print("/lg help - Show all available commands")
 end
 
@@ -689,6 +1120,11 @@ enhancementsFrame:SetScript("OnEvent", function(self, event)
         -- Initialize from saved variables
         LG.EnsureSavedVars()
         
+        -- Add new default settings
+        LG.defaults.enableMinimapButton = true -- Enable minimap button by default
+        LG.defaults.notifyGroupOfLag = false -- Disabled by default to avoid annoyance
+        LG.defaults.enablePredictiveWarnings = true -- Enable predictive warnings by default
+        
         -- Load existing zone data if available
         if LagGuardDB.zoneLatencyData then
             zoneLatencyData = LagGuardDB.zoneLatencyData
@@ -697,6 +1133,21 @@ enhancementsFrame:SetScript("OnEvent", function(self, event)
         -- Load existing log if available
         if LagGuardDB.latencyLog then
             latencyLogEntries = LagGuardDB.latencyLog
+        end
+        
+        -- Load time of day data
+        InitializeTimeAnalytics()
+        
+        -- Load class-specific defensive cooldowns
+        LoadDefensiveCooldowns()
+        
+        -- Create minimap button if enabled
+        if LagGuardDB.enableMinimapButton then
+            local minimapButton = CreateMinimapButton()
+            if minimapButton then
+                -- Initialize with current status
+                minimapButton:UpdateStatus()
+            end
         end
         
         -- Register slash commands
@@ -711,10 +1162,15 @@ enhancementsFrame:SetScript("OnEvent", function(self, event)
             if not LagGuardDB or not LagGuardDB.enabled then return end
             
             UpdateEnhancements()
+            
+            -- Update minimap button status if exists
+            if LG.minimapButton then
+                LG.minimapButton:UpdateStatus()
+            end
         end)
         
         -- Log startup
-        LogLatencyEvent(1, "LagGuard Enhancements loaded")
+        LogLatencyEvent(1, "LagGuard Enhancements loaded with advanced features")
         
         -- Show login message with all available commands
         C_Timer.After(2, function() -- Delay to let other addons load first
@@ -726,7 +1182,15 @@ end)
 -- Make APIs available
 LG.ToggleLatencyLog = ToggleLatencyLog
 LG.ToggleScoreDisplay = ToggleScoreDisplay
+LG.ToggleLatencyMap = ToggleLatencyMap
+LG.ToggleTimeAnalysis = ToggleTimeAnalysis
 LG.IsSafeZone = IsSafeZone
 LG.CalculateConnectionScore = CalculateConnectionScore
 LG.LogLatencyEvent = LogLatencyEvent
-LG.ShowLoginCommands = ShowLoginCommands 
+LG.ShowLoginCommands = ShowLoginCommands
+LG.UpdateTimeOfDayData = UpdateTimeOfDayData
+LG.SuggestDefensives = SuggestDefensives
+LG.NotifyPartyOfLag = NotifyPartyOfLag
+LG.CheckLatencyPredictionWarning = CheckLatencyPredictionWarning
+LG.WarnOnCombatEntry = WarnOnCombatEntry
+LG.PredictUpcomingLatency = PredictUpcomingLatency
