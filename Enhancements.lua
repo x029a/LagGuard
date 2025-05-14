@@ -52,6 +52,360 @@ local lastPredictionUpdate = 0
 local predictionUpdateInterval = 300 -- Update predictions every 5 minutes
 local historyDuration = 7 * 86400 -- Store 7 days of data
 
+-- Initialize time analytics data
+local function InitializeTimeAnalytics()
+    -- Make sure we have a place to store time data
+    LG.EnsureSavedVars()
+    
+    -- Initialize time of day data structure if it doesn't exist
+    if not LagGuardDB.timeOfDayData then
+        LagGuardDB.timeOfDayData = {}
+        
+        -- Initialize with empty data for each hour
+        for hour = 0, 23 do
+            LagGuardDB.timeOfDayData[hour] = {avgLatency = 0, samples = 0}
+        end
+    end
+    
+    -- Load saved data into local cache
+    timeOfDayData = LagGuardDB.timeOfDayData
+end
+
+-- Update time of day data with current latency
+local function UpdateTimeOfDayData()
+    -- Get current time (in-game time would be better but using local for simplicity)
+    local hour = tonumber(date("%H"))
+    if not hour then return end
+    
+    -- Get current latency
+    local _, _, homeLatency, worldLatency = GetNetStats()
+    local currentLatency = math.max(homeLatency or 0, worldLatency or 0)
+    
+    -- Initialize hour data if needed
+    if not timeOfDayData[hour] then
+        timeOfDayData[hour] = {avgLatency = 0, samples = 0}
+    end
+    
+    -- Update running average
+    local current = timeOfDayData[hour]
+    local newAvg = ((current.avgLatency * current.samples) + currentLatency) / (current.samples + 1)
+    
+    timeOfDayData[hour].avgLatency = newAvg
+    timeOfDayData[hour].samples = current.samples + 1
+    
+    -- Save to persistent storage
+    LG.EnsureSavedVars()
+    LagGuardDB.timeOfDayData = timeOfDayData
+end
+
+-- Create time of day analysis frame
+local function ToggleTimeAnalysis()
+    -- Create frame if it doesn't exist yet
+    if not LG.timeAnalysisFrame then
+        local frame = CreateFrame("Frame", "LagGuardTimeAnalysisFrame", UIParent)
+        frame:SetSize(400, 300)
+        frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        frame:SetMovable(true)
+        frame:EnableMouse(true)
+        frame:RegisterForDrag("LeftButton")
+        frame:SetScript("OnDragStart", frame.StartMoving)
+        frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+        frame:SetClampedToScreen(true)
+        frame:Hide() -- Hidden by default
+        
+        -- Create background
+        local bg = frame:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetColorTexture(0, 0, 0, 0.8)
+        
+        -- Create border
+        local border = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+        border:SetPoint("TOPLEFT", frame, "TOPLEFT", -1, 1)
+        border:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 1, -1)
+        border:SetBackdrop({
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 16,
+            insets = {left = 4, right = 4, top = 4, bottom = 4},
+        })
+        border:SetBackdropBorderColor(0.7, 0.7, 0.7, 1)
+        
+        -- Create title
+        local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOP", frame, "TOP", 0, -15)
+        title:SetText("Latency by Time of Day")
+        
+        -- Close button
+        local closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+        closeButton:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+        closeButton:SetScript("OnClick", function() frame:Hide() end)
+        
+        -- Create bar chart for time analysis
+        frame.bars = {}
+        frame.labels = {}
+        
+        -- Create header text for best and worst times
+        local bestTimeHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        bestTimeHeader:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -45)
+        bestTimeHeader:SetText("Best times to play (lowest latency):")
+        
+        local worstTimeHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        worstTimeHeader:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -60)
+        worstTimeHeader:SetText("Worst times to play (highest latency):")
+        
+        -- Create text for best and worst times
+        frame.bestTimes = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        frame.bestTimes:SetPoint("TOPLEFT", frame, "TOPLEFT", 200, -45)
+        frame.bestTimes:SetText("Collecting data...")
+        
+        frame.worstTimes = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        frame.worstTimes:SetPoint("TOPLEFT", frame, "TOPLEFT", 200, -60)
+        frame.worstTimes:SetText("Collecting data...")
+        
+        -- Create current time indicator
+        frame.currentHour = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        frame.currentHour:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -30, -45)
+        frame.currentHour:SetText("Current hour: N/A")
+        
+        -- Create status text for data collection
+        frame.status = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        frame.status:SetPoint("BOTTOM", frame, "BOTTOM", 0, 15)
+        frame.status:SetText("Data points collected: 0")
+        
+        -- Create prediction text
+        frame.prediction = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        frame.prediction:SetPoint("BOTTOM", frame, "BOTTOM", 0, 35)
+        frame.prediction:SetText("Prediction: Collecting data...")
+        
+        -- Function to update the display
+        frame.Update = function()
+            -- Get current time
+            local currentHour = tonumber(date("%H"))
+            frame.currentHour:SetText("Current hour: " .. currentHour .. ":00")
+            
+            -- Calculate total data points
+            local totalSamples = 0
+            for hour, data in pairs(timeOfDayData) do
+                totalSamples = totalSamples + (data.samples or 0)
+            end
+            frame.status:SetText("Data points collected: " .. totalSamples)
+            
+            -- Sort hours by latency for best/worst times
+            local hoursByLatency = {}
+            for hour, data in pairs(timeOfDayData) do
+                if data.samples and data.samples > 0 then
+                    table.insert(hoursByLatency, {hour = hour, latency = data.avgLatency})
+                end
+            end
+            
+            -- Sort hours by latency (ascending)
+            table.sort(hoursByLatency, function(a, b) return a.latency < b.latency end)
+            
+            -- Update best/worst times
+            local bestText = "Not enough data"
+            local worstText = "Not enough data"
+            
+            if #hoursByLatency >= 3 then
+                -- Format best times
+                bestText = ""
+                for i = 1, math.min(3, #hoursByLatency) do
+                    local hourData = hoursByLatency[i]
+                    bestText = bestText .. hourData.hour .. ":00 (" .. math.floor(hourData.latency) .. "ms)"
+                    if i < 3 then bestText = bestText .. ", " end
+                end
+                
+                -- Format worst times
+                worstText = ""
+                for i = #hoursByLatency, math.max(1, #hoursByLatency - 2), -1 do
+                    local hourData = hoursByLatency[i]
+                    worstText = worstText .. hourData.hour .. ":00 (" .. math.floor(hourData.latency) .. "ms)"
+                    if i > #hoursByLatency - 2 then worstText = worstText .. ", " end
+                end
+            end
+            
+            frame.bestTimes:SetText(bestText)
+            frame.worstTimes:SetText(worstText)
+            
+            -- Generate prediction for upcoming hours
+            if #hoursByLatency >= 12 then -- Need at least half a day of data
+                local nextHour = (currentHour + 1) % 24
+                local next2Hours = (currentHour + 2) % 24
+                
+                -- Find latency for these hours
+                local nextHourLatency = "unknown"
+                local next2HoursLatency = "unknown"
+                
+                for _, hourData in ipairs(hoursByLatency) do
+                    if hourData.hour == nextHour then
+                        nextHourLatency = math.floor(hourData.latency)
+                    elseif hourData.hour == next2Hours then
+                        next2HoursLatency = math.floor(hourData.latency)
+                    end
+                end
+                
+                -- Format prediction text
+                if nextHourLatency ~= "unknown" or next2HoursLatency ~= "unknown" then
+                    local predictionText = "Connection quality forecast: "
+                    
+                    -- Upcoming hour
+                    if nextHourLatency ~= "unknown" then
+                        predictionText = predictionText .. "Next hour (" .. nextHour .. ":00): "
+                        
+                        if nextHourLatency < 100 then
+                            predictionText = predictionText .. "|cFF00FF00Good (" .. nextHourLatency .. "ms)|r"
+                        elseif nextHourLatency < 200 then
+                            predictionText = predictionText .. "|cFFFFFF00Fair (" .. nextHourLatency .. "ms)|r"
+                        else
+                            predictionText = predictionText .. "|cFFFF0000Poor (" .. nextHourLatency .. "ms)|r"
+                        end
+                    end
+                    
+                    -- Two hours from now
+                    if next2HoursLatency ~= "unknown" then
+                        if nextHourLatency ~= "unknown" then
+                            predictionText = predictionText .. ", "
+                        end
+                        
+                        predictionText = predictionText .. "In two hours (" .. next2Hours .. ":00): "
+                        
+                        if next2HoursLatency < 100 then
+                            predictionText = predictionText .. "|cFF00FF00Good (" .. next2HoursLatency .. "ms)|r"
+                        elseif next2HoursLatency < 200 then
+                            predictionText = predictionText .. "|cFFFFFF00Fair (" .. next2HoursLatency .. "ms)|r"
+                        else
+                            predictionText = predictionText .. "|cFFFF0000Poor (" .. next2HoursLatency .. "ms)|r"
+                        end
+                    end
+                    
+                    frame.prediction:SetText(predictionText)
+                else
+                    frame.prediction:SetText("Prediction: Not enough data for the upcoming hours")
+                end
+            else
+                frame.prediction:SetText("Prediction: Need more data (at least 12 hours)")
+            end
+            
+            -- Create or update the bar chart
+            local chartTop = -90
+            local chartHeight = 120
+            local chartBottom = chartTop - chartHeight
+            local barWidth = 11  -- 24 hours needs to fit within the frame width
+            local barSpacing = 5
+            local maxBarHeight = chartHeight - 20
+            
+            -- Find max latency for scaling
+            local maxLatency = 50  -- Minimum baseline
+            for hour = 0, 23 do
+                if timeOfDayData[hour] and timeOfDayData[hour].samples and timeOfDayData[hour].samples > 0 then
+                    maxLatency = math.max(maxLatency, timeOfDayData[hour].avgLatency)
+                end
+            end
+            
+            -- Draw hour labels and bars
+            for hour = 0, 23 do
+                local xPos = 20 + (hour * (barWidth + barSpacing))
+                
+                -- Create or update hour label
+                if not frame.labels[hour+1] then
+                    frame.labels[hour+1] = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                    frame.labels[hour+1]:SetPoint("BOTTOM", frame, "TOPLEFT", xPos + (barWidth/2), chartBottom - 15)
+                    -- Only show every 3 hours for clarity
+                    if hour % 3 == 0 then
+                        frame.labels[hour+1]:SetText(hour)
+                    else
+                        frame.labels[hour+1]:SetText("")
+                    end
+                end
+                
+                -- Create or update bar
+                if not frame.bars[hour+1] then
+                    frame.bars[hour+1] = frame:CreateTexture(nil, "ARTWORK")
+                    frame.bars[hour+1]:SetPoint("BOTTOM", frame, "TOPLEFT", xPos, chartBottom)
+                    frame.bars[hour+1]:SetWidth(barWidth)
+                end
+                
+                -- Calculate bar height based on data
+                local barHeight = 5  -- Minimum height when no data
+                local barColor = {r = 0.5, g = 0.5, b = 0.5}  -- Gray for no data
+                
+                if timeOfDayData[hour] and timeOfDayData[hour].samples and timeOfDayData[hour].samples > 0 then
+                    local latency = timeOfDayData[hour].avgLatency
+                    barHeight = (latency / maxLatency) * maxBarHeight
+                    barHeight = math.max(5, barHeight)  -- Ensure minimum visible height
+                    
+                    -- Color based on latency
+                    if latency < 100 then
+                        -- Good (green)
+                        barColor = {r = 0, g = 1, b = 0}
+                    elseif latency < 200 then
+                        -- Medium (yellow)
+                        barColor = {r = 1, g = 1, b = 0}
+                    else
+                        -- Bad (red)
+                        barColor = {r = 1, g = 0, b = 0}
+                    end
+                end
+                
+                frame.bars[hour+1]:SetHeight(barHeight)
+                frame.bars[hour+1]:SetColorTexture(barColor.r, barColor.g, barColor.b, 0.8)
+                
+                -- Highlight current hour
+                if hour == currentHour then
+                    -- Add highlight outline
+                    if not frame.currentHourHighlight then
+                        frame.currentHourHighlight = frame:CreateTexture(nil, "OVERLAY")
+                        frame.currentHourHighlight:SetColorTexture(1, 1, 1, 0.5)
+                    end
+                    
+                    frame.currentHourHighlight:ClearAllPoints()
+                    frame.currentHourHighlight:SetPoint("BOTTOMLEFT", frame.bars[hour+1], "BOTTOMLEFT", -1, -1)
+                    frame.currentHourHighlight:SetPoint("TOPRIGHT", frame.bars[hour+1], "TOPRIGHT", 1, 1)
+                end
+            end
+            
+            -- Add x-axis label
+            if not frame.xAxisLabel then
+                frame.xAxisLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                frame.xAxisLabel:SetPoint("BOTTOM", frame, "BOTTOM", 0, chartBottom - 30)
+                frame.xAxisLabel:SetText("Hour of Day (24-hour format)")
+            end
+            
+            -- Add y-axis label
+            if not frame.yAxisLabel then
+                frame.yAxisLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                frame.yAxisLabel:SetPoint("LEFT", frame, "LEFT", 10, chartBottom + (chartHeight/2))
+                frame.yAxisLabel:SetText("Avg Latency (ms)")
+            end
+        end
+        
+        -- Update when shown
+        frame:SetScript("OnShow", function()
+            frame.Update()
+        end)
+        
+        -- Set up a timer to refresh the frame regularly while it's shown
+        frame:SetScript("OnUpdate", function(self, elapsed)
+            self.timer = (self.timer or 0) + elapsed
+            if self.timer > 30 then  -- Update every 30 seconds
+                self.timer = 0
+                if self:IsShown() then
+                    self.Update()
+                end
+            end
+        end)
+        
+        -- Store reference to the frame
+        LG.timeAnalysisFrame = frame
+    end
+    
+    -- Toggle visibility
+    if LG.timeAnalysisFrame:IsShown() then
+        LG.timeAnalysisFrame:Hide()
+    else
+        LG.timeAnalysisFrame:Show()
+        LG.timeAnalysisFrame.Update()
+    end
+end
+
 -- Load class-specific defensive cooldowns
 local function LoadDefensiveCooldowns()
     local _, class = UnitClass("player")
@@ -989,6 +1343,500 @@ local function ShowLoginCommands()
             end
         end)
     end)
+end
+
+-- Create zone latency map display
+local function ToggleLatencyMap()
+    -- Create map frame if it doesn't exist yet
+    if not LG.latencyMapFrame then
+        local frame = CreateFrame("Frame", "LagGuardLatencyMapFrame", UIParent)
+        frame:SetSize(600, 400)
+        frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        frame:SetMovable(true)
+        frame:EnableMouse(true)
+        frame:RegisterForDrag("LeftButton")
+        frame:SetScript("OnDragStart", frame.StartMoving)
+        frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+        frame:SetClampedToScreen(true)
+        frame:Hide() -- Hidden by default
+        
+        -- Create background
+        local bg = frame:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetColorTexture(0, 0, 0, 0.8)
+        
+        -- Create border
+        local border = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+        border:SetPoint("TOPLEFT", frame, "TOPLEFT", -1, 1)
+        border:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 1, -1)
+        border:SetBackdrop({
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 16,
+            insets = {left = 4, right = 4, top = 4, bottom = 4},
+        })
+        border:SetBackdropBorderColor(0.7, 0.7, 0.7, 1)
+        
+        -- Create title
+        local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOP", frame, "TOP", 0, -15)
+        title:SetText("Zone Latency Map")
+        
+        -- Close button
+        local closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+        closeButton:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+        closeButton:SetScript("OnClick", function() frame:Hide() end)
+        
+        -- Create scroll frame to hold zone list
+        local scrollFrame = CreateFrame("ScrollFrame", "LagGuardMapScrollFrame", frame, "UIPanelScrollFrameTemplate")
+        scrollFrame:SetPoint("TOPLEFT", 20, -40)
+        scrollFrame:SetPoint("BOTTOMRIGHT", -40, 20)
+        
+        local scrollChild = CreateFrame("Frame", "LagGuardMapScrollChild", scrollFrame)
+        scrollChild:SetSize(scrollFrame:GetWidth(), 800) -- Height will be adjusted dynamically
+        scrollFrame:SetScrollChild(scrollChild)
+        
+        -- Add headers
+        local zoneHeader = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        zoneHeader:SetPoint("TOPLEFT", 10, 0)
+        zoneHeader:SetWidth(200)
+        zoneHeader:SetJustifyH("LEFT")
+        zoneHeader:SetText("Zone")
+        
+        local avgHeader = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        avgHeader:SetPoint("LEFT", zoneHeader, "RIGHT", 20, 0)
+        avgHeader:SetWidth(80)
+        avgHeader:SetJustifyH("RIGHT")
+        avgHeader:SetText("Avg Latency")
+        
+        local samplesHeader = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        samplesHeader:SetPoint("LEFT", avgHeader, "RIGHT", 20, 0)
+        samplesHeader:SetWidth(60)
+        samplesHeader:SetJustifyH("RIGHT")
+        samplesHeader:SetText("Samples")
+        
+        local statusHeader = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        statusHeader:SetPoint("LEFT", samplesHeader, "RIGHT", 20, 0)
+        statusHeader:SetWidth(80)
+        statusHeader:SetJustifyH("CENTER")
+        statusHeader:SetText("Status")
+        
+        -- Add separator line
+        local separator = scrollChild:CreateTexture(nil, "ARTWORK")
+        separator:SetHeight(1)
+        separator:SetWidth(scrollChild:GetWidth() - 20)
+        separator:SetPoint("TOPLEFT", zoneHeader, "BOTTOMLEFT", 0, -5)
+        separator:SetColorTexture(0.7, 0.7, 0.7, 0.5)
+        
+        -- Function to update map display
+        frame.Update = function()
+            -- Clear existing entries
+            for i = 1, scrollChild:GetNumChildren() do
+                local child = select(i, scrollChild:GetChildren())
+                if child and child:GetObjectType() == "Frame" and not child:GetName() then
+                    child:Hide()
+                end
+            end
+            
+            -- Create sorted list of zones
+            local zoneList = {}
+            for zoneID, data in pairs(zoneLatencyData) do
+                -- Only add zones with enough samples
+                if data.samples and data.samples >= 3 then
+                    local zoneName = GetMapNameByID and GetMapNameByID(zoneID) or ("Zone " .. zoneID)
+                    if zoneName then
+                        table.insert(zoneList, {
+                            id = zoneID,
+                            name = zoneName,
+                            avgLatency = (data.avgHome + data.avgWorld) / 2,
+                            samples = data.samples
+                        })
+                    end
+                end
+            end
+            
+            -- Sort by latency (low to high)
+            table.sort(zoneList, function(a, b) return a.avgLatency < b.avgLatency end)
+            
+            -- Add "no data" message if list is empty
+            if #zoneList == 0 then
+                local noDataText = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                noDataText:SetPoint("TOP", separator, "BOTTOM", 0, -20)
+                noDataText:SetText("No zone data collected yet. Visit different zones to collect data.")
+                return
+            end
+            
+            -- Add zone entries
+            local yOffset = -30  -- Start below the separator
+            
+            for i, zone in ipairs(zoneList) do
+                local entryFrame = CreateFrame("Frame", nil, scrollChild)
+                entryFrame:SetSize(scrollChild:GetWidth() - 20, 30)
+                entryFrame:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 10, yOffset)
+                
+                -- Alternate row backgrounds
+                if i % 2 == 0 then
+                    local rowBg = entryFrame:CreateTexture(nil, "BACKGROUND")
+                    rowBg:SetAllPoints()
+                    rowBg:SetColorTexture(0.15, 0.15, 0.15, 0.3)
+                end
+                
+                -- Zone name
+                local nameText = entryFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+                nameText:SetPoint("LEFT", 0, 0)
+                nameText:SetWidth(200)
+                nameText:SetJustifyH("LEFT")
+                nameText:SetText(zone.name)
+                
+                -- Average latency
+                local avgText = entryFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+                avgText:SetPoint("LEFT", nameText, "RIGHT", 20, 0)
+                avgText:SetWidth(80)
+                avgText:SetJustifyH("RIGHT")
+                
+                -- Color based on latency
+                local latencyText = string.format("%.1fms", zone.avgLatency)
+                if zone.avgLatency < 100 then
+                    avgText:SetText("|cFF00FF00" .. latencyText .. "|r")
+                elseif zone.avgLatency < 200 then
+                    avgText:SetText("|cFFFFFF00" .. latencyText .. "|r")
+                else
+                    avgText:SetText("|cFFFF0000" .. latencyText .. "|r")
+                end
+                
+                -- Samples count
+                local samplesText = entryFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+                samplesText:SetPoint("LEFT", avgText, "RIGHT", 20, 0)
+                samplesText:SetWidth(60)
+                samplesText:SetJustifyH("RIGHT")
+                samplesText:SetText(zone.samples)
+                
+                -- Status indicator
+                local statusText = entryFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+                statusText:SetPoint("LEFT", samplesText, "RIGHT", 20, 0)
+                statusText:SetWidth(80)
+                statusText:SetJustifyH("CENTER")
+                
+                if zone.avgLatency < LG.defaults.safeZoneThreshold then
+                    statusText:SetText("|cFF00FF00Stable|r")
+                else
+                    statusText:SetText("|cFFFF0000Unstable|r")
+                end
+                
+                -- Make the row highlight on hover
+                entryFrame:SetScript("OnEnter", function(self)
+                    if i % 2 == 0 then
+                        rowBg:SetColorTexture(0.3, 0.3, 0.3, 0.3)
+                    else
+                        local rowHighlight = self:CreateTexture(nil, "BACKGROUND")
+                        rowHighlight:SetAllPoints()
+                        rowHighlight:SetColorTexture(0.3, 0.3, 0.3, 0.3)
+                        self.highlight = rowHighlight
+                    end
+                    
+                    -- Add tooltip with more info
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:ClearLines()
+                    GameTooltip:AddLine(zone.name)
+                    GameTooltip:AddLine(" ")
+                    GameTooltip:AddLine("Home Latency: " .. string.format("%.1fms", zoneLatencyData[zone.id].avgHome))
+                    GameTooltip:AddLine("World Latency: " .. string.format("%.1fms", zoneLatencyData[zone.id].avgWorld))
+                    GameTooltip:AddLine("Samples Collected: " .. zone.samples)
+                    GameTooltip:AddLine(" ")
+                    
+                    if zone.avgLatency < LG.defaults.safeZoneThreshold then
+                        GameTooltip:AddLine("|cFF00FF00This zone has historically stable latency|r")
+                    else
+                        GameTooltip:AddLine("|cFFFF0000This zone has historically unstable latency|r")
+                    end
+                    
+                    GameTooltip:Show()
+                end)
+                
+                entryFrame:SetScript("OnLeave", function(self)
+                    if i % 2 == 0 then
+                        rowBg:SetColorTexture(0.15, 0.15, 0.15, 0.3)
+                    elseif self.highlight then
+                        self.highlight:Hide()
+                        self.highlight = nil
+                    end
+                    
+                    GameTooltip:Hide()
+                end)
+                
+                -- Update y offset for next row
+                yOffset = yOffset - 30
+                
+                -- Show the frame
+                entryFrame:Show()
+            end
+            
+            -- Adjust scrollChild height
+            scrollChild:SetHeight(math.max(scrollFrame:GetHeight(), -yOffset + 20))
+        end
+        
+        -- Add info text about data collection
+        local infoText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        infoText:SetPoint("BOTTOM", frame, "BOTTOM", 0, 10)
+        infoText:SetWidth(500)
+        infoText:SetText("Zones with better connection quality appear at the top. Data is collected as you visit zones.")
+        
+        -- Update when shown
+        frame:SetScript("OnShow", function()
+            frame.Update()
+        end)
+        
+        -- Store reference to the frame
+        LG.latencyMapFrame = frame
+    end
+    
+    -- Toggle visibility
+    if LG.latencyMapFrame:IsShown() then
+        LG.latencyMapFrame:Hide()
+    else
+        LG.latencyMapFrame:Show()
+        LG.latencyMapFrame.Update()
+    end
+end
+
+-- Create minimap button for LagGuard
+local function CreateMinimapButton()
+    -- Create the minimap button frame
+    local minimapButton = CreateFrame("Button", "LagGuardMinimapButton", Minimap)
+    minimapButton:SetSize(32, 32)
+    minimapButton:SetFrameStrata("MEDIUM")
+    minimapButton:SetFrameLevel(8)
+    minimapButton:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+    
+    -- Create icon texture
+    local icon = minimapButton:CreateTexture(nil, "BACKGROUND")
+    icon:SetSize(20, 20)
+    icon:SetPoint("CENTER", 0, 0)
+    icon:SetTexture("Interface\\AddOns\\LagGuard\\Textures\\icon") -- You may need to create this texture
+    -- If the custom texture doesn't exist, use a default one
+    if not icon:GetTexture() then
+        icon:SetTexture("Interface\\Icons\\INV_Misc_EngGizmos_30")
+    end
+    minimapButton.icon = icon
+    
+    -- Create border texture
+    local border = minimapButton:CreateTexture(nil, "OVERLAY")
+    border:SetSize(54, 54)
+    border:SetPoint("CENTER", 0, 0)
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    
+    -- Set initial position (0 degrees on the minimap)
+    minimapButton:SetPoint("CENTER", Minimap, "CENTER", 80, 0)
+    
+    -- Variables for minimap button dragging
+    local minimapShapes = {
+        ["ROUND"] = {true, true, true, true},
+        ["SQUARE"] = {false, false, false, false},
+        ["CORNER-TOPLEFT"] = {false, false, false, true},
+        ["CORNER-TOPRIGHT"] = {false, false, true, false},
+        ["CORNER-BOTTOMLEFT"] = {false, true, false, false},
+        ["CORNER-BOTTOMRIGHT"] = {true, false, false, false},
+        ["SIDE-LEFT"] = {false, true, false, true},
+        ["SIDE-RIGHT"] = {true, false, true, false},
+        ["SIDE-TOP"] = {false, false, true, true},
+        ["SIDE-BOTTOM"] = {true, true, false, false},
+        ["TRICORNER-TOPLEFT"] = {false, true, true, true},
+        ["TRICORNER-TOPRIGHT"] = {true, false, true, true},
+        ["TRICORNER-BOTTOMLEFT"] = {true, true, false, true},
+        ["TRICORNER-BOTTOMRIGHT"] = {true, true, true, false},
+    }
+    
+    -- Function to update button position
+    local function UpdateButtonPosition()
+        local angle = math.rad(LagGuardDB.minimapButtonPosition or 0)
+        local x = math.cos(angle) * 80
+        local y = math.sin(angle) * 80
+        minimapButton:SetPoint("CENTER", Minimap, "CENTER", x, y)
+    end
+    
+    -- Set up initial position from saved variables
+    LG.EnsureSavedVars()
+    if not LagGuardDB.minimapButtonPosition then
+        LagGuardDB.minimapButtonPosition = 0
+    end
+    UpdateButtonPosition()
+    
+    -- Make the button draggable
+    minimapButton:RegisterForDrag("LeftButton")
+    minimapButton:SetScript("OnDragStart", function()
+        minimapButton:StartMoving()
+    end)
+    
+    minimapButton:SetScript("OnDragStop", function()
+        minimapButton:StopMovingOrSizing()
+        
+        -- Calculate the angle based on position
+        local centerX, centerY = Minimap:GetCenter()
+        local buttonX, buttonY = minimapButton:GetCenter()
+        local angle = math.deg(math.atan2(buttonY - centerY, buttonX - centerX))
+        
+        -- Save position to settings
+        LagGuardDB.minimapButtonPosition = angle
+        
+        -- Update position to snap to the minimap circle
+        UpdateButtonPosition()
+    end)
+    
+    -- Tooltip
+    minimapButton:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:AddLine("LagGuard")
+        
+        -- Get current latency
+        local _, _, homeLatency, worldLatency = GetNetStats()
+        local maxLatency = math.max(homeLatency, worldLatency)
+        
+        -- Get current connection score
+        local score = currentConnectionScore or 100
+        
+        -- Add status to tooltip
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Current Status:")
+        
+        -- Latency info
+        if maxLatency < 100 then
+            GameTooltip:AddLine("Latency: |cFF00FF00" .. maxLatency .. "ms|r")
+        elseif maxLatency < 300 then
+            GameTooltip:AddLine("Latency: |cFFFFFF00" .. maxLatency .. "ms|r")
+        else
+            GameTooltip:AddLine("Latency: |cFFFF0000" .. maxLatency .. "ms|r")
+        end
+        
+        -- Connection score
+        if score >= 80 then
+            GameTooltip:AddLine("Connection Quality: |cFF00FF00" .. math.floor(score) .. "/100|r")
+        elseif score >= 50 then
+            GameTooltip:AddLine("Connection Quality: |cFFFFFF00" .. math.floor(score) .. "/100|r")
+        else
+            GameTooltip:AddLine("Connection Quality: |cFFFF0000" .. math.floor(score) .. "/100|r")
+        end
+        
+        -- Add usage tips
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Left-Click: Toggle Connection Score")
+        GameTooltip:AddLine("Right-Click: Show Commands")
+        GameTooltip:AddLine("Shift-Click: Toggle Latency Log")
+        
+        GameTooltip:Show()
+    end)
+    
+    minimapButton:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    
+    -- Click handlers
+    minimapButton:SetScript("OnClick", function(self, button)
+        if IsShiftKeyDown() then
+            -- Shift-click to toggle latency log
+            ToggleLatencyLog()
+        elseif button == "RightButton" then
+            -- Right-click for commands menu
+            ShowLoginCommands()
+        else
+            -- Left-click to toggle connection score
+            ToggleScoreDisplay()
+        end
+    end)
+    
+    -- Update color based on connection status
+    minimapButton.UpdateStatus = function()
+        local score = currentConnectionScore or 100
+        
+        -- Update color based on score
+        if score >= 80 then
+            -- Good (green)
+            icon:SetVertexColor(0, 1, 0)
+        elseif score >= 50 then
+            -- Medium (yellow)
+            icon:SetVertexColor(1, 1, 0)
+        else
+            -- Bad (red)
+            icon:SetVertexColor(1, 0, 0)
+        end
+    end
+    
+    -- Make the button movable
+    minimapButton:SetMovable(true)
+    minimapButton:SetClampedToScreen(true)
+    
+    -- Store global reference
+    LG.minimapButton = minimapButton
+    
+    -- Initialize with current status
+    minimapButton.UpdateStatus()
+    
+    return minimapButton
+end
+
+-- Predict upcoming latency based on historical data
+local function PredictUpcomingLatency()
+    -- Get current time
+    local currentHour = tonumber(date("%H"))
+    if not currentHour then return nil end
+    
+    -- Check if we have enough historical data
+    local timeData = timeOfDayData
+    if not timeData or not next(timeData) then return nil end
+    
+    -- Look at the next hour's historical pattern
+    local nextHour = (currentHour + 1) % 24
+    local nextData = timeData[nextHour]
+    
+    -- If we don't have data for the next hour, check current hour
+    if not nextData or not nextData.samples or nextData.samples < 3 then
+        nextData = timeData[currentHour]
+        if not nextData or not nextData.samples or nextData.samples < 3 then
+            return nil -- Not enough data
+        end
+    end
+    
+    -- Return the predicted latency based on historical average
+    return nextData.avgLatency
+end
+
+-- Check for upcoming latency predictions and warn if needed
+local function CheckLatencyPredictionWarning()
+    if not LG.defaults.enablePredictiveWarnings then return end
+    
+    -- Only update predictions every few minutes to avoid spamming
+    local currentTime = GetTime()
+    if currentTime - lastPredictionUpdate < predictionUpdateInterval then return end
+    lastPredictionUpdate = currentTime
+    
+    -- Get predicted latency based on time of day and historical patterns
+    local prediction = PredictUpcomingLatency()
+    if not prediction or prediction < LG.defaults.warningThreshold then return end
+    
+    -- Log the prediction
+    LogLatencyEvent(2, string.format("Latency prediction: Expected increase to %dms in upcoming period", prediction))
+    
+    -- Only show warning to user if it's significantly higher than current latency
+    local _, _, homeLatency, worldLatency = GetNetStats()
+    local currentLatency = math.max(homeLatency or 0, worldLatency or 0)
+    
+    if prediction > currentLatency * 1.5 and prediction > LG.defaults.warningThreshold then
+        -- Show warning message
+        local msg = string.format("LagGuard Warning: Historical data suggests latency may increase to ~%dms within the next hour", prediction)
+        
+        -- Add to chat
+        if LG.defaults.chatAlerts then
+            print("|cFFFFFF00" .. msg .. "|r")
+        end
+        
+        -- Show raid warning style message
+        if LG.defaults.screenAlerts then
+            RaidNotice_AddMessage(RaidWarningFrame, "|cFFFFFF00" .. msg .. "|r", ChatTypeInfo["RAID_WARNING"])
+        end
+        
+        -- Play sound
+        if LG.defaults.soundEnabled then
+            PlaySound(8959)
+        end
+    end
 end
 
 -- Periodic update for enhancements
