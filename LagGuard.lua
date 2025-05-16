@@ -1,6 +1,19 @@
 -- LagGuard: Protect Hardcore Players from Lag-Related Deaths
 local addonName, LG = ...
-LG.version = GetAddOnMetadata(addonName, "Version")
+
+-- Get addon version, handling both retail and classic
+local function GetAddonVersion()
+    -- Check which API to use for version info (differs between retail and classic)
+    if C_AddOns and C_AddOns.GetAddOnMetadata then
+        return C_AddOns.GetAddOnMetadata(addonName, "Version")
+    elseif GetAddOnMetadata then
+        return GetAddOnMetadata(addonName, "Version")
+    else
+        return "1.1.0" -- Fallback version if metadata functions aren't available
+    end
+end
+
+LG.version = GetAddonVersion()
 
 -- Initialize the addon default state
 local defaults = {
@@ -44,6 +57,9 @@ local function EnsureSavedVars()
         end
     end
 end
+
+-- Make sure the function is exposed to the addon table early
+LG.EnsureSavedVars = EnsureSavedVars
 
 -- Setup warning textures
 local warningTexture = CreateFrame("Frame", "LagGuardWarningTexture", UIParent)
@@ -264,6 +280,5 @@ LG.AddToHistory = AddToHistory
 LG.CalculateBaseline = CalculateBaseline
 LG.ShouldWarn = ShouldWarn
 LG.DisplayWarning = DisplayWarning
-LG.EnsureSavedVars = EnsureSavedVars
 LG.homeLatencyHistory = homeLatencyHistory
 LG.worldLatencyHistory = worldLatencyHistory 

@@ -7,8 +7,8 @@ local addonName, LG = ...
 local alertFrame
 
 -- Create a local reference to the history tables for easier access
-local homeLatencyHistory = LG.homeLatencyHistory
-local worldLatencyHistory = LG.worldLatencyHistory
+local homeLatencyHistory = LG.homeLatencyHistory or {}
+local worldLatencyHistory = LG.worldLatencyHistory or {}
 
 -- Initialize variables for tracking trends
 local prevHomeLatency = 0 
@@ -17,6 +17,30 @@ local prevWorldLatency = 0
 -- Create a frame for handling updates
 local updateFrame = CreateFrame("Frame") 
 local updateInterval = 0.5
+
+-- Ensure required functions exist
+LG.EnsureSavedVars = LG.EnsureSavedVars or function()
+    if not LagGuardDB then LagGuardDB = {} end
+    if not LG.defaults then LG.defaults = {} end
+    
+    -- Apply defaults for any missing values
+    for k, v in pairs(LG.defaults) do
+        if LagGuardDB[k] == nil then
+            LagGuardDB[k] = v
+        end
+    end
+end
+
+LG.CalculateBaseline = LG.CalculateBaseline or function(history)
+    if not history or #history == 0 then return 0 end
+    
+    local sum = 0
+    local baselineRecords = LG.defaults and LG.defaults.baselineRecords or 20
+    for i = 1, math.min(#history, baselineRecords) do
+        sum = sum + history[i]
+    end
+    return sum / math.min(#history, baselineRecords)
+end
 
 -- Function to save the frame position
 local function SaveFramePosition()
@@ -73,6 +97,7 @@ local function UpdateAlertFrameLayout()
         alertFrame.graphButton:Hide()
         alertFrame.logButton:Hide()
         alertFrame.scoreButton:Hide()
+        alertFrame.liveDataButton:Hide()
     else
         alertFrame:SetSize(130, 60) -- Larger size for full mode
         
@@ -87,6 +112,7 @@ local function UpdateAlertFrameLayout()
         alertFrame.graphButton:Show()
         alertFrame.logButton:Show()
         alertFrame.scoreButton:Show()
+        alertFrame.liveDataButton:Show()
     end
 end
 
@@ -190,7 +216,7 @@ local function Initialize()
     -- Create graph button (small icon to open graph)
     local graphButton = CreateFrame("Button", nil, alertFrame)
     graphButton:SetSize(16, 16)
-    graphButton:SetPoint("BOTTOM", alertFrame, "BOTTOM", -30, 5)
+    graphButton:SetPoint("BOTTOM", alertFrame, "BOTTOM", 45, 5)
     
     local graphIcon = graphButton:CreateTexture(nil, "ARTWORK")
     graphIcon:SetAllPoints()
@@ -215,10 +241,38 @@ local function Initialize()
         end
     end)
     
+    -- Create live data button
+    local liveDataButton = CreateFrame("Button", nil, alertFrame)
+    liveDataButton:SetSize(16, 16)
+    liveDataButton:SetPoint("BOTTOM", alertFrame, "BOTTOM", -50, 5)
+    
+    local liveDataIcon = liveDataButton:CreateTexture(nil, "ARTWORK")
+    liveDataIcon:SetAllPoints()
+    liveDataIcon:SetTexture("Interface\\Buttons\\UI-MicroStream-Yellow")
+    liveDataButton.icon = liveDataIcon
+    
+    liveDataButton:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        GameTooltip:SetText("Show Live Data")
+        GameTooltip:Show()
+    end)
+    
+    liveDataButton:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
+    
+    liveDataButton:SetScript("OnClick", function()
+        if LG.ToggleLiveDataGraph then
+            LG.ToggleLiveDataGraph()
+        else
+            LG.CreateLiveDataGraph()
+        end
+    end)
+    
     -- Create log button
     local logButton = CreateFrame("Button", nil, alertFrame)
     logButton:SetSize(16, 16)
-    logButton:SetPoint("BOTTOM", alertFrame, "BOTTOM", 0, 5)
+    logButton:SetPoint("BOTTOM", alertFrame, "BOTTOM", -15, 5)
     
     local logIcon = logButton:CreateTexture(nil, "ARTWORK")
     logIcon:SetAllPoints()
@@ -246,7 +300,7 @@ local function Initialize()
     -- Create score button
     local scoreButton = CreateFrame("Button", nil, alertFrame)
     scoreButton:SetSize(16, 16)
-    scoreButton:SetPoint("BOTTOM", alertFrame, "BOTTOM", 30, 5)
+    scoreButton:SetPoint("BOTTOM", alertFrame, "BOTTOM", 15, 5)
     
     local scoreIcon = scoreButton:CreateTexture(nil, "ARTWORK")
     scoreIcon:SetAllPoints()
@@ -275,6 +329,7 @@ local function Initialize()
     alertFrame.graphButton = graphButton
     alertFrame.logButton = logButton
     alertFrame.scoreButton = scoreButton
+    alertFrame.liveDataButton = liveDataButton
     
     -- Create tooltip
     alertFrame:SetScript("OnEnter", function(self)
@@ -482,9 +537,9 @@ local function Initialize()
             alertFrame.homeText:SetText("H")
             alertFrame.worldText:SetText("W")
         else
-        alertFrame.homeText:SetText("H: " .. homeLatency .. "ms")
-        alertFrame.worldText:SetText("W: " .. worldLatency .. "ms")
-    end
+            alertFrame.homeText:SetText("H: " .. homeLatency .. "ms")
+            alertFrame.worldText:SetText("W: " .. worldLatency .. "ms")
+        end
     end
     
     -- Load the saved position
@@ -526,4 +581,341 @@ end)
 -- Store reference to the alertFrame for others to use
 LG.alertFrame = alertFrame 
 LG.SaveFramePosition = SaveFramePosition
-LG.UpdateAlertFrameLayout = UpdateAlertFrameLayout 
+LG.UpdateAlertFrameLayout = UpdateAlertFrameLayout
+
+LG.ShouldWarn = LG.ShouldWarn or function(current, baseline)
+    if not LagGuardDB then
+        LG.EnsureSavedVars()
+    end
+    
+    -- Use defaults if LagGuardDB is still nil
+    local thresholds = LagGuardDB or LG.defaults or {
+        latencyThreshold = 250,
+        warningThreshold = 500,
+        dangerThreshold = 1000,
+        percentIncreaseThreshold = 200
+    }
+    
+    -- Check if we exceed absolute thresholds
+    if current >= thresholds.dangerThreshold then
+        return 3 -- danger level
+    elseif current >= thresholds.warningThreshold then
+        return 2 -- warning level
+    elseif current >= thresholds.latencyThreshold then
+        return 1 -- caution level
+    end
+    
+    -- Check if we exceed percentage increase threshold
+    if baseline > 0 and ((current - baseline) / baseline * 100 >= thresholds.percentIncreaseThreshold) then
+        return 2 -- warning level
+    end
+    
+    return 0 -- no warning
+end
+
+-- Live Data Graph functionality
+local liveDataFrame
+local liveDataUpdateFrequency = 0.05  -- Update every 50ms for smooth animation
+local maxDataPoints = 30  -- Reduced further from 60 to 30 for better performance
+local dataCollectionInterval = 1  -- Collect a data point every second
+local timeSinceLastDataPoint = 0
+local homeLatencyData = {}
+local worldLatencyData = {}
+local dataSampleTimes = {}
+local isAnimating = false
+local maxVisiblePoints = 20  -- Reduced from 30 to 20 for better performance
+
+-- Function to create the live data visualization
+function LG.CreateLiveDataGraph()
+    if liveDataFrame then
+        LG.ToggleLiveDataGraph()
+        return
+    end
+    
+    -- Create frame
+    liveDataFrame = CreateFrame("Frame", "LagGuardLiveDataFrame", UIParent)
+    liveDataFrame:SetSize(700, 500)  -- Restore original size
+    liveDataFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    liveDataFrame:SetFrameStrata("DIALOG")
+    liveDataFrame:SetMovable(true)
+    liveDataFrame:EnableMouse(true)
+    liveDataFrame:RegisterForDrag("LeftButton")
+    liveDataFrame:SetScript("OnDragStart", liveDataFrame.StartMoving)
+    liveDataFrame:SetScript("OnDragStop", liveDataFrame.StopMovingOrSizing)
+    liveDataFrame:SetClampedToScreen(true)
+    liveDataFrame:Hide()
+    
+    -- Create background
+    local bg = liveDataFrame:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0, 0, 0, 0.9)
+    
+    -- Create border
+    local border = CreateFrame("Frame", nil, liveDataFrame, "BackdropTemplate")
+    border:SetPoint("TOPLEFT", liveDataFrame, "TOPLEFT", -1, 1)
+    border:SetPoint("BOTTOMRIGHT", liveDataFrame, "BOTTOMRIGHT", 1, -1)
+    border:SetBackdrop({
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        edgeSize = 32,
+        insets = {left = 11, right = 11, top = 12, bottom = 10},
+    })
+    
+    -- Create a STANDARD WOW SYSTEM FONT TITLE that will always be visible
+    local titleString = liveDataFrame:CreateFontString(nil, "OVERLAY")
+    titleString:SetFontObject(GameFontHighlightLarge)  -- Using default WoW font that's guaranteed to be visible
+    titleString:SetPoint("TOP", liveDataFrame, "TOP", 0, -20)
+    titleString:SetText("LagGuard Live Data")
+    
+    -- Create close button
+    local closeButton = CreateFrame("Button", nil, liveDataFrame, "UIPanelCloseButton")
+    closeButton:SetPoint("TOPRIGHT", -5, -5)
+    closeButton:SetScript("OnClick", function() liveDataFrame:Hide(); isAnimating = false; end)
+    
+    -- Create a container frame for the graph area
+    local graphContainer = CreateFrame("Frame", nil, liveDataFrame)
+    graphContainer:SetPoint("TOPLEFT", 50, -60)
+    graphContainer:SetPoint("BOTTOMRIGHT", -50, 100)
+    
+    -- Add a background to the graph area
+    local graphBackground = graphContainer:CreateTexture(nil, "BACKGROUND")
+    graphBackground:SetAllPoints()
+    graphBackground:SetColorTexture(0.05, 0.05, 0.05, 0.5)
+    
+    -- Create graph area directly inside container
+    local graphArea = CreateFrame("Frame", nil, graphContainer)
+    graphArea:SetAllPoints()
+    liveDataFrame.graphArea = graphArea
+    
+    -- Add border to graph area
+    local graphBorder = CreateFrame("Frame", nil, graphContainer, "BackdropTemplate")
+    graphBorder:SetPoint("TOPLEFT", graphContainer, "TOPLEFT", -1, 1)
+    graphBorder:SetPoint("BOTTOMRIGHT", graphContainer, "BOTTOMRIGHT", 1, -1)
+    graphBorder:SetBackdrop({
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 12,
+        insets = {left = 1, right = 1, top = 1, bottom = 1},
+    })
+    
+    -- Simple fixed grid lines without any labels
+    local gridLines = {}
+    -- Horizontal grid lines
+    for i = 1, 4 do
+        local line = graphContainer:CreateLine()
+        line:SetColorTexture(0.3, 0.3, 0.3, 0.5)
+        line:SetThickness(1)
+        
+        -- Calculate height based on simple percentage
+        local height = (i / 5) * graphContainer:GetHeight()
+        line:SetStartPoint("TOPLEFT", 0, -height)
+        line:SetEndPoint("TOPRIGHT", 0, -height)
+        table.insert(gridLines, line)
+    end
+    
+    -- Add vertical grid lines
+    for i = 1, 4 do
+        local line = graphContainer:CreateLine()
+        line:SetColorTexture(0.3, 0.3, 0.3, 0.5)
+        line:SetThickness(1)
+        
+        -- Calculate x position based on simple percentage
+        local xPos = (i / 5) * graphContainer:GetWidth()
+        line:SetStartPoint("TOPLEFT", xPos, 0)
+        line:SetEndPoint("BOTTOMLEFT", xPos, 0)
+        table.insert(gridLines, line)
+    end
+    
+    -- Pre-create line objects for better performance
+    liveDataFrame.homeLatencyLines = {}
+    liveDataFrame.worldLatencyLines = {}
+    
+    for i = 1, maxVisiblePoints do
+        -- Create lines as children of the graph container for proper anchoring
+        local homeLine = graphContainer:CreateLine()
+        homeLine:SetThickness(3)
+        homeLine:SetColorTexture(0, 1, 0, 1.0)
+        homeLine:Hide()
+        table.insert(liveDataFrame.homeLatencyLines, homeLine)
+        
+        local worldLine = graphContainer:CreateLine()
+        worldLine:SetThickness(3)
+        worldLine:SetColorTexture(0, 0.7, 1, 1.0)
+        worldLine:Hide()
+        table.insert(liveDataFrame.worldLatencyLines, worldLine)
+    end
+    
+    -- Create simple legend labels that are guaranteed to be visible
+    local greenSquare = liveDataFrame:CreateTexture(nil, "ARTWORK")
+    greenSquare:SetSize(15, 15)
+    greenSquare:SetPoint("BOTTOMLEFT", liveDataFrame, "BOTTOMLEFT", 20, 20)
+    greenSquare:SetColorTexture(0, 1, 0, 1)
+    
+    local greenLabel = liveDataFrame:CreateFontString(nil, "OVERLAY")
+    greenLabel:SetFontObject(GameFontNormal)  -- Using default WoW font that's guaranteed to be visible
+    greenLabel:SetPoint("LEFT", greenSquare, "RIGHT", 5, 0)
+    greenLabel:SetText("Home")
+    
+    local blueSquare = liveDataFrame:CreateTexture(nil, "ARTWORK")
+    blueSquare:SetSize(15, 15)
+    blueSquare:SetPoint("LEFT", greenLabel, "RIGHT", 20, 0)
+    blueSquare:SetColorTexture(0, 0.7, 1, 1)
+    
+    local blueLabel = liveDataFrame:CreateFontString(nil, "OVERLAY")
+    blueLabel:SetFontObject(GameFontNormal)  -- Using default WoW font that's guaranteed to be visible
+    blueLabel:SetPoint("LEFT", blueSquare, "RIGHT", 5, 0)
+    blueLabel:SetText("World")
+    
+    -- Scale information using standard WoW UI font
+    local scaleLabel = liveDataFrame:CreateFontString(nil, "OVERLAY")
+    scaleLabel:SetFontObject(GameFontNormal)  -- Using default WoW font that's guaranteed to be visible
+    scaleLabel:SetPoint("BOTTOM", liveDataFrame, "BOTTOM", 0, 50)
+    scaleLabel:SetText("Latency Graph: 0-800ms scale (30 seconds of data)")
+    
+    -- Current values text field
+    local currentValues = liveDataFrame:CreateFontString(nil, "OVERLAY")
+    currentValues:SetFontObject(GameFontNormal)  -- Using default WoW font that's guaranteed to be visible
+    currentValues:SetPoint("BOTTOM", liveDataFrame, "BOTTOM", 0, 20)
+    currentValues:SetText("Current - Home: 0ms  World: 0ms")
+    liveDataFrame.currentValuesText = currentValues
+    
+    -- Throttled animation logic - highly optimized
+    local updateCounter = 0
+    local function UpdateLiveGraph(self, elapsed)
+        if not isAnimating then return end
+        
+        -- Get latency values
+        local _, _, homeLatency, worldLatency = GetNetStats()
+        
+        -- Update time since last data point
+        timeSinceLastDataPoint = timeSinceLastDataPoint + elapsed
+        
+        -- Throttle visual updates
+        updateCounter = updateCounter + elapsed
+        
+        -- Collect data at regular intervals
+        if timeSinceLastDataPoint >= dataCollectionInterval then
+            -- Add new data point
+            table.insert(homeLatencyData, 1, homeLatency)
+            table.insert(worldLatencyData, 1, worldLatency)
+            table.insert(dataSampleTimes, 1, GetTime())
+            
+            -- Trim data arrays to max points
+            if #homeLatencyData > maxDataPoints then
+                table.remove(homeLatencyData, #homeLatencyData)
+                table.remove(worldLatencyData, #worldLatencyData)
+                table.remove(dataSampleTimes, #dataSampleTimes)
+            end
+            
+            timeSinceLastDataPoint = 0
+            
+            -- Force redraw after collecting data
+            updateCounter = 1
+        end
+        
+        -- Only update display at throttled rate (10fps)
+        if updateCounter >= 0.1 then
+            updateCounter = 0
+            
+            -- Format the text with color coding
+            local function formatLatency(value)
+                if value < 100 then
+                    return "|cFF00FF00" .. value .. "ms|r" -- Green for good latency
+                elseif value < 300 then
+                    return "|cFFFFFF00" .. value .. "ms|r" -- Yellow for medium latency
+                else
+                    return "|cFFFF0000" .. value .. "ms|r" -- Red for high latency
+                end
+            end
+            
+            -- Update current values text - very simple approach
+            self.currentValuesText:SetText("Current - Home: " .. homeLatency .. "ms  World: " .. worldLatency .. "ms")
+            
+            -- Draw graph if we have data
+            if #homeLatencyData > 1 then
+                -- Get container dimensions once
+                local containerWidth = graphContainer:GetWidth()
+                local containerHeight = graphContainer:GetHeight()
+                
+                -- Hide all lines first
+                for i = 1, maxVisiblePoints do
+                    self.homeLatencyLines[i]:Hide()
+                    self.worldLatencyLines[i]:Hide()
+                end
+                
+                -- Use fixed scale of 0-800ms for simplicity and consistency
+                local maxLatency = 800
+                
+                -- Calculate how many data points we can draw
+                local dataPoints = math.min(#homeLatencyData-1, maxVisiblePoints)
+                
+                -- Calculate point spacing across full width of container
+                local pointSpacing = containerWidth / maxVisiblePoints
+                
+                -- Draw both home and world latency lines
+                for i = 1, dataPoints do
+                    -- Get lines from pool
+                    local homeLine = self.homeLatencyLines[i]
+                    local worldLine = self.worldLatencyLines[i]
+                    
+                    -- Simple x position calculation
+                    local x1 = containerWidth - ((i - 1) * pointSpacing)
+                    local x2 = containerWidth - (i * pointSpacing)
+                    
+                    -- Calculate Y values with simple normalization
+                    -- Home latency
+                    local homeY1 = (1 - math.min(homeLatencyData[i] / maxLatency, 1.0)) * containerHeight
+                    local homeY2 = (1 - math.min(homeLatencyData[i+1] / maxLatency, 1.0)) * containerHeight
+                    
+                    -- World latency 
+                    local worldY1 = (1 - math.min(worldLatencyData[i] / maxLatency, 1.0)) * containerHeight
+                    local worldY2 = (1 - math.min(worldLatencyData[i+1] / maxLatency, 1.0)) * containerHeight
+                    
+                    -- Set lines using TOPLEFT anchor for consistency
+                    homeLine:SetStartPoint("TOPLEFT", x1, -homeY1)
+                    homeLine:SetEndPoint("TOPLEFT", x2, -homeY2)
+                    homeLine:Show()
+                    
+                    worldLine:SetStartPoint("TOPLEFT", x1, -worldY1)
+                    worldLine:SetEndPoint("TOPLEFT", x2, -worldY2)
+                    worldLine:Show()
+                end
+            end
+        end
+    end
+    
+    -- Set script for updates with less frequent full updates
+    liveDataFrame:SetScript("OnUpdate", UpdateLiveGraph)
+    
+    -- Toggle visibility and animation
+    LG.ToggleLiveDataGraph()
+end
+
+-- Function to toggle live data graph
+function LG.ToggleLiveDataGraph()
+    if not liveDataFrame then
+        LG.CreateLiveDataGraph()
+        return
+    end
+    
+    if liveDataFrame:IsShown() then
+        liveDataFrame:Hide()
+        isAnimating = false
+    else
+        -- Reset data when showing
+        homeLatencyData = {}
+        worldLatencyData = {}
+        dataSampleTimes = {}
+        timeSinceLastDataPoint = 0
+        
+        -- Force initial data points to ensure something displays immediately
+        local _, _, homeLatency, worldLatency = GetNetStats()
+        -- Add a few initial data points
+        for i = 1, 3 do
+            table.insert(homeLatencyData, homeLatency)
+            table.insert(worldLatencyData, worldLatency)
+            table.insert(dataSampleTimes, GetTime() - (i-1))
+        end
+        
+        liveDataFrame:Show()
+        isAnimating = true
+    end
+end 

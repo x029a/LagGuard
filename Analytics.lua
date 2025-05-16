@@ -3,7 +3,10 @@
 
 local addonName, LG = ...
 
--- Initialize new default settings
+-- Initialize the analytics module
+LG.analytics = {}
+
+-- Analytics default settings
 local analyticsDefaults = {
     -- Advanced trend analysis settings
     enableTrendAnalysis = true,
@@ -28,7 +31,10 @@ local analyticsDefaults = {
     predictionThreshold = 100, -- ms increase to predict as dangerous
 }
 
--- Register these defaults with the main addon
+-- Ensure defaults are available in the main addon table
+if not LG.defaults then LG.defaults = {} end
+
+-- Copy analytics defaults to main defaults table
 for k, v in pairs(analyticsDefaults) do
     LG.defaults[k] = v
 end

@@ -68,7 +68,7 @@ title:SetText("LagGuard Configuration")
 
 local version = configFrame:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
 version:SetPoint("TOPRIGHT", -30, -15)
-version:SetText("v" .. LG.version)
+version:SetText("v" .. (LG.version or "1.1.0"))
 
 local description = scrollChild:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
 description:SetPoint("TOPLEFT", 5, -5)
@@ -900,7 +900,7 @@ initFrame:SetScript("OnEvent", function(self, event)
         EnsureSavedVars()
         
         -- Update the version displays
-        version:SetText("v" .. LG.version)
+        version:SetText("v" .. (LG.version or "1.1.0"))
         interfaceVersion:SetText("Version " .. LG.version)
         
         -- Register with Interface Options if available

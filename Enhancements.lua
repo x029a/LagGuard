@@ -3,30 +3,26 @@
 
 local addonName, LG = ...
 
--- Initialize new default settings
+-- Initialize default settings for enhancements
 local enhancementsDefaults = {
-    -- Safe Zone Detection
     enableSafeZoneDetection = true,
-    safeZoneThreshold = 150, -- ms threshold to consider a zone "safe"
     recordZoneLatency = true,
-    
-    -- Connection Quality Scoring
-    enableConnectionScoring = true,
-    scoreUpdateInterval = 10, -- seconds between score updates
-    
-    -- Latency Log
+    cancelCastingOnLag = true,
     enableLatencyLog = true,
-    latencyLogSize = 50, -- number of entries to keep
-    logSevereSpikeThreshold = 500, -- ms threshold to log as severe
-    
-    -- Auto Actions
-    enableAutoActions = false, -- Off by default for safety
-    autoActionsThreshold = 1000, -- ms to trigger auto actions
-    stopFollowOnLag = true, -- Stop following on lag spike
-    cancelCastingOnLag = true, -- Cancel current cast on severe lag
+    latencyLogSize = 50,
+    stopFollowOnLag = true,
+    enableAutoActions = false,
+    autoActionsThreshold = 1000,
+    enableConnectionScoring = true,
+    logSevereSpikeThreshold = 500,
+    safeZoneThreshold = 150,
+    scoreUpdateInterval = 10,
 }
 
--- Register these defaults with the main addon
+-- Ensure defaults are available in the main addon table
+if not LG.defaults then LG.defaults = {} end
+
+-- Copy enhancements defaults to main defaults table
 for k, v in pairs(enhancementsDefaults) do
     LG.defaults[k] = v
 end
@@ -1720,6 +1716,7 @@ local function CreateMinimapButton()
         GameTooltip:AddLine("Left-Click: Toggle Connection Score")
         GameTooltip:AddLine("Right-Click: Show Commands")
         GameTooltip:AddLine("Shift-Click: Toggle Latency Log")
+        GameTooltip:AddLine("Shift+Right-Click: Open Config Panel")
         
         GameTooltip:Show()
     end)
@@ -1731,8 +1728,14 @@ local function CreateMinimapButton()
     -- Click handlers
     minimapButton:SetScript("OnClick", function(self, button)
         if IsShiftKeyDown() then
-            -- Shift-click to toggle latency log
-            ToggleLatencyLog()
+            if button == "RightButton" then
+                -- Shift+Right-click to open config panel
+                InterfaceOptionsFrame_OpenToCategory("LagGuard")
+                InterfaceOptionsFrame_OpenToCategory("LagGuard") -- Call twice to ensure it opens (known WoW UI issue)
+            else
+                -- Shift+Left-click to toggle latency log
+                ToggleLatencyLog()
+            end
         elseif button == "RightButton" then
             -- Right-click for commands menu
             ShowLoginCommands()
